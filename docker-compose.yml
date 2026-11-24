@@ -175,6 +175,8 @@ services:
     depends_on:
       api:
         condition: service_healthy
+    environment:
+      SAM_API_HOSTPORT: api:8000
     networks: [app]
     restart: unless-stopped
 

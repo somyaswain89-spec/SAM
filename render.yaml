@@ -1,0 +1,139 @@
+# Staging-only Blueprint. Do not change this environment to production until
+# the object-storage and customer integration gates in docs/RENDER_STAGING.md pass.
+envVarGroups:
+  - name: sam-staging-runtime
+    envVars:
+      - key: APP_SECRET_KEY
+        generateValue: true
+
+services:
+  - type: web
+    name: sam-staging-frontend
+    runtime: docker
+    region: ohio
+    plan: 0.5c-512mb
+    dockerContext: .
+    dockerfilePath: frontend/Dockerfile
+    healthCheckPath: /healthz
+    autoDeployTrigger: checksPass
+    envVars:
+      - key: SAM_API_HOSTPORT
+        fromService:
+          type: pserv
+          name: sam-staging-api
+          property: hostport
+
+  - type: pserv
+    name: sam-staging-api
+    runtime: docker
+    region: ohio
+    plan: 1c-2g
+    dockerContext: .
+    dockerfilePath: backend/Dockerfile
+    preDeployCommand: alembic -c alembic.ini upgrade head
+    autoDeployTrigger: checksPass
+    envVars:
+      - fromGroup: sam-staging-runtime
+      - key: APP_ENV
+        value: production
+      - key: SAM_MODE
+        value: staging
+      - key: LOAD_SAMPLE_DATA
+        value: "false"
+      - key: COOKIE_SECURE
+        value: "true"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: sam-staging-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: sam-staging-queue
+          property: connectionString
+      - key: CORS_ORIGINS
+        fromService:
+          type: web
+          name: sam-staging-frontend
+          property: url
+      - key: PUBLIC_BASE_URL
+        fromService:
+          type: web
+          name: sam-staging-frontend
+          property: url
+      - key: BOOTSTRAP_ADMIN_EMAIL
+        sync: false
+      - key: BOOTSTRAP_ADMIN_PASSWORD
+        sync: false
+      - key: UPLOAD_DIR
+        value: /app/uploads
+
+  - type: worker
+    name: sam-staging-worker
+    runtime: docker
+    region: ohio
+    plan: 1c-2g
+    dockerContext: .
+    dockerfilePath: backend/Dockerfile
+    dockerCommand: celery -A backend.workers.celery_app:celery_app worker --loglevel=INFO --concurrency=2
+    autoDeployTrigger: checksPass
+    envVars:
+      - fromGroup: sam-staging-runtime
+      - key: APP_ENV
+        value: production
+      - key: SAM_MODE
+        value: staging
+      - key: DATABASE_URL
+        fromDatabase:
+          name: sam-staging-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: sam-staging-queue
+          property: connectionString
+      - key: UPLOAD_DIR
+        value: /app/uploads
+      - key: IDEMPOTENCY_RETENTION_DAYS
+        value: "7"
+
+  - type: worker
+    name: sam-staging-beat
+    runtime: docker
+    region: ohio
+    plan: 0.5c-512mb
+    dockerContext: .
+    dockerfilePath: backend/Dockerfile
+    dockerCommand: celery -A backend.workers.celery_app:celery_app beat --loglevel=INFO
+    autoDeployTrigger: checksPass
+    envVars:
+      - fromGroup: sam-staging-runtime
+      - key: APP_ENV
+        value: production
+      - key: SAM_MODE
+        value: staging
+      - key: DATABASE_URL
+        fromDatabase:
+          name: sam-staging-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: sam-staging-queue
+          property: connectionString
+
+  - type: keyvalue
+    name: sam-staging-queue
+    region: ohio
+    plan: 256mb
+    maxmemoryPolicy: noeviction
+    persistenceMode: journal-snapshot
+    ipAllowList: []
+
+databases:
+  - name: sam-staging-db
+    databaseName: samstaging
+    user: samstaging
+    plan: 0.5c-1g
+    region: ohio
+    ipAllowList: []
