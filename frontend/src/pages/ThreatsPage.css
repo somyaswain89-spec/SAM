@@ -1,0 +1,15 @@
+.inline-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #526177;
+  font-size: 14px;
+}
+
+.inline-check input {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  min-height: 18px;
+  min-width: 18px;
+}
