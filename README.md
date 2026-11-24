@@ -10,6 +10,8 @@ This is an active engineering transformation, not a production certification. Se
 
 ## Run locally
 
+For step-by-step client workstation instructions (GitHub clone or ZIP, Docker setup, local secrets, startup, login, logs, and shutdown), see [Client local setup](docs/CLIENT_LOCAL_SETUP.md).
+
 Python 3.12+ and Node.js 22+ are required. To run against PostgreSQL and Redis, copy `.env.example` to `.env`, replace every placeholder with unique random values, and start the stack:
 
 ```sh
