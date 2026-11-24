@@ -20,7 +20,7 @@ docker compose up --build
 
 The web client is at `http://localhost:8080`; the API is proxied under `/api/v1`. Production mode requires TLS in front of the web container because refresh cookies are Secure. The API does not create or reset database tables at startup: the one-shot `migrate` service applies Alembic revisions before the API and worker start.
 
-For local feature QA without Docker, first run `uv sync --locked --extra dev` and `npm --prefix frontend ci`, then start both processes with `./scripts/run-local-qa.sh`. Open `http://127.0.0.1:5173`; the script migrates an ignored local SQLite database and runs actual Celery task functions inline for local imports/exports. Use the separate Docker Compose stack for PostgreSQL/Redis worker QA.
+For local feature QA without Docker, first run `uv sync --locked --extra dev` and `npm --prefix frontend ci`, then start the app with `./scripts/run-local-qa.sh`. With Node.js and frontend dependencies available, open `http://127.0.0.1:5173`; otherwise the launcher serves the last production build through FastAPI at `http://127.0.0.1:8000`. The script migrates an ignored local SQLite database and runs actual Celery task functions inline for local imports/exports. Use the separate Docker Compose stack for PostgreSQL/Redis worker QA.
 
 For frontend iteration, run the API, Postgres, and Redis services, then run Vite separately:
 
