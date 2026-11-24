@@ -1,43 +1,132 @@
-from typing import Optional
-import base64,hashlib,hmac,json,secrets,time
-from datetime import datetime,timedelta,timezone
-from fastapi import Depends,HTTPException
-from fastapi.security import HTTPAuthorizationCredentials,HTTPBearer
-from backend.core.config import MODE,TOKEN_SECRET,TOKEN_TTL_HOURS
-from backend.core.database import connection
-from backend.core.util import audit
-bearer=HTTPBearer(auto_error=False)
-def hash_password(p):
-    salt=secrets.token_bytes(16); key=hashlib.pbkdf2_hmac('sha256',p.encode(),salt,310000)
-    return base64.urlsafe_b64encode(salt+key).decode()
-def verify_password(p,encoded):
+"""Central password, access-token and route-authorization services."""
+
+from __future__ import annotations
+
+import base64
+import hashlib
+import hmac
+import secrets
+from datetime import UTC, datetime, timedelta
+
+import jwt
+from argon2 import PasswordHasher
+from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
+from fastapi import Depends, HTTPException
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from sqlalchemy.orm import Session as DatabaseSession
+
+from backend.core.config import ACCESS_TOKEN_TTL_MINUTES, MODE, REFRESH_TOKEN_TTL_DAYS, TOKEN_SECRET
+from backend.core.database import get_db
+from backend.repositories.auth import AuthRepository
+
+bearer = HTTPBearer(auto_error=False)
+password_hasher = PasswordHasher(
+    time_cost=3, memory_cost=65536, parallelism=2, hash_len=32, salt_len=16
+)
+JWT_ISSUER = "sam-security-platform"
+JWT_AUDIENCE = "sam-api"
+_EPHEMERAL_DEV_SECRET = secrets.token_urlsafe(48)
+
+
+def _jwt_secret() -> str:
+    if TOKEN_SECRET:
+        return TOKEN_SECRET
+    if MODE in {"qa", "demo", "development", "test"}:
+        # Local-only sessions intentionally expire when the process restarts.
+        return _EPHEMERAL_DEV_SECRET
+    raise HTTPException(status_code=503, detail="Authentication is not configured")
+
+
+def hash_password(password: str) -> str:
+    return password_hasher.hash(password)
+
+
+def verify_password(password: str, encoded: str) -> bool:
+    """Verify Argon2id hashes and upgrade legacy PBKDF2 hashes at login."""
+    if encoded.startswith("$argon2id$"):
+        try:
+            return password_hasher.verify(encoded, password)
+        except (VerifyMismatchError, VerificationError, InvalidHashError):
+            return False
+    # Existing SAM accounts used PBKDF2-SHA256; retain verification for migration.
     try:
-        raw=base64.urlsafe_b64decode(encoded); return hmac.compare_digest(raw[16:],hashlib.pbkdf2_hmac('sha256',p.encode(),raw[:16],310000))
-    except Exception:return False
-def b64(b):return base64.urlsafe_b64encode(b).rstrip(b'=').decode()
-def issue_token(user):
-    secret=TOKEN_SECRET or ('qa-only-change-me' if MODE in {'demo','qa'} else '')
-    if not secret:raise HTTPException(503,'SAM_TOKEN_SECRET is not configured')
-    now=int(time.time()); h=b64(b'{"alg":"HS256","typ":"JWT"}'); p=b64(json.dumps({'sub':user['id'],'exp':now+TOKEN_TTL_HOURS*3600}).encode()); msg=f'{h}.{p}'
-    return f'{msg}.{b64(hmac.new(secret.encode(),msg.encode(),hashlib.sha256).digest())}'
-def current_user(auth:Optional[HTTPAuthorizationCredentials]=Depends(bearer)):
-    if not auth:raise HTTPException(401,'Bearer token required')
+        raw = base64.urlsafe_b64decode(encoded.encode())
+        if len(raw) < 48:
+            return False
+        key = hashlib.pbkdf2_hmac("sha256", password.encode(), raw[:16], 310_000)
+        return hmac.compare_digest(raw[16:], key)
+    except (ValueError, TypeError):
+        return False
+
+
+def needs_password_rehash(encoded: str) -> bool:
+    return not encoded.startswith("$argon2id$") or password_hasher.check_needs_rehash(encoded)
+
+
+def issue_token(user: dict) -> str:
+    now = datetime.now(UTC)
+    claims = {
+        "sub": str(user["id"]),
+        "iat": now,
+        "exp": now + timedelta(minutes=ACCESS_TOKEN_TTL_MINUTES),
+        "jti": secrets.token_urlsafe(24),
+        "iss": JWT_ISSUER,
+        "aud": JWT_AUDIENCE,
+    }
+    return jwt.encode(claims, _jwt_secret(), algorithm="HS256")
+
+
+def current_user(
+    auth: HTTPAuthorizationCredentials | None = Depends(bearer),
+    session: DatabaseSession = Depends(get_db),
+):
+    if not auth:
+        raise HTTPException(
+            status_code=401, detail="Bearer token required", headers={"WWW-Authenticate": "Bearer"}
+        )
     try:
-        h,p,sig=auth.credentials.split('.'); secret=TOKEN_SECRET or ('qa-only-change-me' if MODE in {'demo','qa'} else '')
-        msg=f'{h}.{p}'; expected=b64(hmac.new(secret.encode(),msg.encode(),hashlib.sha256).digest())
-        claims=json.loads(base64.urlsafe_b64decode(p+'='*((4-len(p)%4)%4)))
-        if not secret or not hmac.compare_digest(sig,expected) or claims['exp']<time.time():raise ValueError()
-    except Exception:raise HTTPException(401,'Invalid or expired token')
-    import hashlib as _h
-    with connection() as c:u=c.execute('SELECT u.id,u.email,u.role,u.active FROM users u JOIN sessions s ON s.user_id=u.id WHERE u.id=? AND s.token_hash=? AND s.expires_at>?',(claims['sub'],_h.sha256(auth.credentials.encode()).hexdigest(),datetime.now(timezone.utc).isoformat())).fetchone()
-    if not u or not u['active']:raise HTTPException(401,'Session expired or account disabled')
-    return dict(u)
-def require_roles(*roles):
+        claims = jwt.decode(
+            auth.credentials,
+            _jwt_secret(),
+            algorithms=["HS256"],
+            issuer=JWT_ISSUER,
+            audience=JWT_AUDIENCE,
+        )
+        user_id = int(claims["sub"])
+    except (jwt.InvalidTokenError, KeyError, TypeError, ValueError):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or expired token",
+            headers={"WWW-Authenticate": "Bearer"},
+        ) from None
+    user = AuthRepository(session).user_for_access_token(
+        user_id, hashlib.sha256(auth.credentials.encode()).hexdigest()
+    )
+    if not user:
+        raise HTTPException(
+            status_code=401,
+            detail="Session expired or account disabled",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return {"id": user.id, "email": user.email, "role": user.role, "active": user.active}
+
+
+def require_roles(*roles: str):
     def check(user=Depends(current_user)):
-        if user['role'] not in roles:raise HTTPException(403,'Insufficient role')
+        if user["role"] not in roles:
+            raise HTTPException(status_code=403, detail="Insufficient role")
         return user
+
     return check
-def create_session(c,user,token):
-    digest=hashlib.sha256(token.encode()).hexdigest(); expires=(datetime.now(timezone.utc)+timedelta(hours=TOKEN_TTL_HOURS)).isoformat()
-    c.execute('INSERT INTO sessions(token_hash,user_id,expires_at,created_at) VALUES(?,?,?,?)',(digest,user['id'],expires,datetime.now(timezone.utc).isoformat()))
-    audit(c,user,'login','session')
+
+
+def new_refresh_token() -> str:
+    return secrets.token_urlsafe(64)
+
+
+def refresh_expiry() -> str:
+    return (datetime.now(UTC) + timedelta(days=REFRESH_TOKEN_TTL_DAYS)).isoformat()
+
+
+def token_digest(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()

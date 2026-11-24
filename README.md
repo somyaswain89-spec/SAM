@@ -1,66 +1,106 @@
-# SAM
-SAM RFP
+# SAM security exposure platform
 
----
+SAM is being rebuilt as a full-stack application. The browser client is React, TypeScript and Vite; the API is FastAPI; persistence is SQLAlchemy with Alembic; imports and exports use Celery and Redis. PostgreSQL is the deployment database. The previous inline HTML application is not served by the backend.
 
-# SAM Security Exposure Platform — QA build
+## Current implementation status
 
-SAM now has a modular, persistent API for QA. Feature routers live under `backend/api/`; shared database, settings, authentication, and audit helpers live under `backend/core/`; validated request contracts live under `backend/schemas/`. Qualys and ServiceNow connectivity are isolated as pending adapters in `backend/api/integrations.py`.
+The repository contains the React client, authenticated/versioned API, relational schema and migrations, account/session controls, asset and finding workflows, risk/compliance/exposure views, CISA KEV and FIRST EPSS ingestion, audit chain, governance and containment approval records, CSV/XLSX import/export jobs, and Docker Compose deployment files. Qualys VMDR and ServiceNow CMDB adapters use configured endpoints and asynchronous read-only sync jobs. Passive external-domain discovery uses explicitly authorized targets and SSLMate Cert Spotter certificate-transparency data; discoveries remain candidates until an administrator verifies and promotes them to inventory. ServiceNow incident creation is separately disabled by default and requires a dedicated writer account, explicit configuration, analyst action, persisted idempotency, and provider confirmation. Containment approvals are recorded in SAM and do not isolate customer infrastructure until an external provider adapter is implemented and configured.
 
-## Run for QA
+This is an active engineering transformation, not a production certification. See [the engineering audit](docs/ENGINEERING_AUDIT.md) for implemented scope, verification evidence, and outstanding work. PostgreSQL, Redis, Docker, and browser end-to-end verification must be run in an environment that provides those services before production acceptance.
 
-```sh
-python -m venv .venv
-. .venv/bin/activate
-pip install -r backend/requirements.txt
-uvicorn backend.main:app --host 127.0.0.1 --port 8765
-```
+## Run locally
 
-Default mode is `qa`, with fictional seed data and OpenAPI at `/api/docs`. Default QA login is `admin@sam.local` / `demo-access`. Override with `SAM_ADMIN_EMAIL` and `SAM_ADMIN_PASSWORD` before first startup. Set `DATABASE_URL=postgresql://user:password@host:5432/sam` to use PostgreSQL, or use the default local SQLite database. Set `SAM_TOKEN_SECRET` and `SAM_CORS_ORIGINS` for an environment-specific QA deployment. Do not use demo credentials outside an isolated QA environment.
-
-## Run the QA checks
+Python 3.12+ and Node.js 22+ are required. To run against PostgreSQL and Redis, copy `.env.example` to `.env`, replace every placeholder with unique random values, and start the stack:
 
 ```sh
-pip install -r backend/requirements-qa.txt
-python -m pytest backend/tests -q
+cp .env.example .env
+# Edit .env. Use URL-safe random secrets; never commit .env.
+docker compose up --build
 ```
 
-The tests use an isolated temporary SQLite database and fictional data. They exercise authentication, inventory pagination, finding order, dashboard counts, priority/SLA output, attack paths, governance safeguards, analyst responses, and the explicit integration-pending behavior.
+The web client is at `http://localhost:8080`; the API is proxied under `/api/v1`. Production mode requires TLS in front of the web container because refresh cookies are Secure. The API does not create or reset database tables at startup: the one-shot `migrate` service applies Alembic revisions before the API and worker start.
 
-## Feature map
+For local feature QA without Docker, first run `uv sync --locked --extra dev` and `npm --prefix frontend ci`, then start the app with `./scripts/run-local-qa.sh`. With Node.js and frontend dependencies available, open `http://127.0.0.1:5173`; otherwise the launcher serves the last production build through FastAPI at `http://127.0.0.1:8000`. The script migrates an ignored local SQLite database and runs actual Celery task functions inline for local imports/exports. Use the separate Docker Compose stack for PostgreSQL/Redis worker QA.
 
-- `backend/api/auth.py` — login, logout, session identity, QA user provisioning.
-- `backend/api/assets.py` — paged inventory, filters, CRUD, asset detail with findings.
-- `backend/api/findings.py` — findings, state changes, deterministic severity sorting.
-- `backend/api/dashboard.py` — dashboard aggregation and risk-priority scoring.
-- `backend/api/risk.py` — due-date SLA forecast; no SLA is inferred when no due date exists.
-- `backend/api/compliance.py` — recorded-score summary and per-asset compliance view; unknown is not treated as failure.
-- `backend/api/exposure.py` — external/internal classifications and recorded WAF posture.
-- `backend/api/attack_paths.py` — explicit `attributes.depends_on` graph edges only.
-- `backend/api/threats.py` — zero-day candidate findings and synthetic QA signals.
-- `backend/api/governance.py` — exceptions, two-person review, response workflows, containment impact/approval simulation.
-- `backend/api/reports.py` — executive JSON report.
-- `backend/api/analyst.py` — authenticated, rule-based QA analyst grounded in SAM records.
-- `backend/api/audit.py` — role-restricted audit-event query.
-- `backend/api/integrations.py` — connector health and explicit not-yet-implemented sync boundary.
+For frontend iteration, run the API, Postgres, and Redis services, then run Vite separately:
 
-## Data rules
+```sh
+npm --prefix frontend install
+npm --prefix frontend run dev
+```
 
-- List APIs return `items`, `total`, `limit`, and `offset`; maximum page size is 500.
-- Assets default to `name ASC, id ASC`. Allowed asset sorts: `name`, `criticality`, `compliance`, `updated_at`, `kind`.
-- Findings default to severity-weighted risk order (Critical, High, Medium, Low, Informational), then latest update, then ID. `/api/risk/priorities` returns the computed score and factors and sorts by score descending, due date ascending, then finding ID.
-- The risk score is a transparent heuristic from severity, exposure classification, criticality, KEV flag, EPSS, and age. It is not a calibrated probability.
-- Compliance percentages are stored observations. SAM does not claim a compliance control passed unless control evidence is integrated.
-- SLA forecast only uses explicit `due_at` values.
-- Attack paths include only relationships explicitly stored in an asset's `attributes.depends_on` array.
-- Containment approval changes only SAM's QA asset state. It never calls endpoint, cloud, firewall, network, or WAF systems.
+For a local backend-only run, set `APP_ENV=development`, configure a non-production `DATABASE_URL`, apply migrations, and start Uvicorn:
 
-## Main routes
+```sh
+uv sync --extra dev
+uv run alembic -c alembic.ini upgrade head
+uv run uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
+```
 
-`POST /api/auth/login`, `GET /api/auth/me`, `POST /api/auth/logout`; `GET|POST /api/assets`, `GET|PATCH /api/assets/{id}`; `GET|POST /api/findings`, `PATCH /api/findings/{id}/state`; `GET /api/dashboard`; `GET /api/risk/priorities`, `GET /api/risk/sla-forecast`; `GET /api/compliance/summary`, `/api/compliance/assets`; `GET /api/exposure/summary`, `/api/exposure/external-assets`; `GET /api/attack-paths`; `GET /api/threats/zero-day-signals`; `POST|GET /api/exceptions`, `POST /api/exceptions/{id}/review`; `POST|GET /api/workflows`; `POST|GET /api/containment/requests`, `POST /api/containment/requests/{id}/decision`; `GET /api/reports/executive`; `POST /api/analyst/ask`; `GET /api/audit`; `GET /api/integrations/status`.
+For a single-process local QA session without Redis, set `CELERY_TASK_ALWAYS_EAGER=true` while `APP_ENV=development`; this runs the actual Celery task functions inline so CSV/XLSX import and export flows can be exercised. Keep this setting disabled in shared QA and production, where tasks must run through the Redis-backed worker service.
 
-## Integration boundary
+The API docs are at `/api/v1/docs` outside production. Sample data is never loaded unless `LOAD_SAMPLE_DATA=true` is explicitly set in a development/QA environment. For the QA fixture account, set `SAM_ADMIN_EMAIL` and `SAM_ADMIN_PASSWORD` yourself; no default login is provisioned.
 
-The integration endpoints intentionally report `501` until source-specific Qualys and ServiceNow adapters are implemented and validated. No live records are fetched or written. Integration remains the planned pending work; the QA customer can test SAM-owned data flows, API behavior, scoring, reports, audit, and simulated approvals without sending actions to infrastructure.
+## Verify changes
 
-This build is for isolated QA, not production. Before go-live, add versioned schema migrations, SSO and organization-scoped authorization, managed secrets, backup/restore verification, monitoring, a durable import queue, and client-approved source adapters. PostgreSQL is supported for QA; do not assume this alone constitutes production hardening.
+```sh
+uv sync --locked --extra dev
+uv run pytest backend/tests -q
+uv run ruff check backend
+uv run ruff format --check backend
+npm --prefix frontend ci
+npm --prefix frontend run typecheck
+npm --prefix frontend run lint
+npm --prefix frontend test
+npm --prefix frontend run build
+npx --prefix frontend playwright install chromium
+npm --prefix frontend run test:e2e
+```
+
+Backend and Playwright QA tests use fresh SQLite databases and run the real Alembic migrations; the browser test starts the API and Vite itself. Deployment uses PostgreSQL. CI runs backend, frontend, browser E2E, and container-build checks. PostgreSQL runtime behavior remains a separate QA gate.
+
+## Architecture
+
+```mermaid
+flowchart LR
+  Browser[React and TypeScript] -->|same-origin HTTPS| Proxy[Nginx]
+  Proxy -->|/api/v1| API[FastAPI]
+  API --> ORM[SQLAlchemy repositories and services]
+  ORM --> DB[(PostgreSQL)]
+  API --> Queue[Redis broker]
+  Queue --> Worker[Celery import, export, integration workers]
+  Worker --> DB
+  Worker --> Files[(Shared private upload volume)]
+  API --> Files
+  API --> Adapters[Scanner, CMDB, AI, and threat feed adapters]
+  Worker --> Adapters
+  Adapters -. deployment endpoints and credentials .-> External[Customer systems and public feeds]
+```
+
+## Repository map
+
+- `frontend/src/` — routed React pages, auth-aware API client, components, and styles.
+- `frontend/e2e/` — Playwright browser journeys against a fresh QA backend and Vite process.
+- `backend/api/` — versioned HTTP routes and request validation.
+- `backend/schemas/` — API request and response contracts.
+- `backend/services/` — business operations and file parsing.
+- `backend/repositories/` — SQLAlchemy query and persistence operations.
+- `backend/db/` — ORM models and shared declarative base.
+- `backend/core/` — settings, database sessions, authentication, logging, and cross-cutting controls.
+- `backend/integrations/` — external connector and notification adapters.
+- `backend/workers/` — Celery app and asynchronous task handlers.
+- `backend/migrations/versions/` — reviewed, versioned schema changes.
+- `backend/tests/` — backend API/security/import tests.
+- `docs/` and `scripts/` — audit, QA/deployment procedures, backup, and restore.
+
+## Important operating limits
+
+- Scanner/CMDB synchronization requires approved Qualys and ServiceNow endpoints, credentials, tenant-specific mapping, Redis and worker services, and customer validation. ServiceNow ticket writeback separately requires `SERVICENOW_TICKET_WRITE_ENABLED=true` and dedicated ticket writer credentials. Connection tests, sync history, and ticket references are stored in SAM; success is recorded only after ServiceNow returns a real incident reference.
+- Containment approval is only a SAM governance record until an independently secured endpoint/cloud/network adapter is configured and tested. It does not shut down or quarantine a server by itself.
+- Recorded compliance and WAF posture are not policy attestations or independent WAF verification.
+- CISA KEV and FIRST EPSS snapshots are stored and matched to open findings and impacted assets. A daily Celery Beat job runs at 02:15 UTC; administrators can also request a manual sync. EPSS is an exploitation-likelihood signal, not a complete risk score. Public-feed access still depends on the deployed API/worker having HTTPS egress.
+- External discovery requires a Cert Spotter API token on both API and worker. SAM queries only certificate-transparency records for domains an administrator attests they are authorized to monitor; it does not probe returned hosts. Configure `CERTSPOTTER_API_TOKEN` and the bounded `EXTERNAL_DISCOVERY_MAX_PAGES` setting. Provider tenant access has not yet been validated.
+- The analyst API uses SAM records. Without provider configuration it clearly operates in limited rule-based QA mode. An optional OpenAI Responses API adapter is disabled by default and only sends the user's question, up to four prior chat turns, bounded asset summaries, and prioritized finding metadata when `AI_ANALYST_ENABLED=true`, `AI_ANALYST_DATA_APPROVED=true`, and a server-side API key and model are configured. Raw finding evidence and credentials are excluded; customer approval, provider policy review, and tenant QA remain required.
+- Configure external TLS termination, secret management, persistent encrypted volumes, monitoring, log retention, backup storage, and recovery objectives for the customer environment.
+
+See [operations and recovery](docs/OPERATIONS.md) for environment, deployment, backup, restore, and rollback procedures.

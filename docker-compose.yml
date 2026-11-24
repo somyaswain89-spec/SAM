@@ -1,0 +1,193 @@
+name: sam
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: sam
+      POSTGRES_USER: sam
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sam -d sam"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [data]
+
+  redis:
+    image: redis:7.4-alpine
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping | grep PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [data]
+
+  migrate:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    command: ["alembic", "-c", "alembic.ini", "upgrade", "head"]
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      DATABASE_URL: postgresql+psycopg://sam:${POSTGRES_PASSWORD}@postgres:5432/sam
+      APP_SECRET_KEY: ${APP_SECRET_KEY:?Set APP_SECRET_KEY in .env}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [data]
+    restart: "no"
+
+  api:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      DATABASE_URL: postgresql+psycopg://sam:${POSTGRES_PASSWORD}@postgres:5432/sam
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      APP_SECRET_KEY: ${APP_SECRET_KEY:?Set APP_SECRET_KEY in .env}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080}
+      BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:?Set BOOTSTRAP_ADMIN_EMAIL in .env}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:?Set BOOTSTRAP_ADMIN_PASSWORD in .env}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      UPLOAD_DIR: /app/uploads
+      QUALYS_BASE_URL: ${QUALYS_BASE_URL:-}
+      QUALYS_USERNAME: ${QUALYS_USERNAME:-}
+      QUALYS_PASSWORD: ${QUALYS_PASSWORD:-}
+      QUALYS_API_VERSION: ${QUALYS_API_VERSION:-6.0}
+      SERVICENOW_BASE_URL: ${SERVICENOW_BASE_URL:-}
+      SERVICENOW_USERNAME: ${SERVICENOW_USERNAME:-}
+      SERVICENOW_PASSWORD: ${SERVICENOW_PASSWORD:-}
+      SERVICENOW_TABLES: ${SERVICENOW_TABLES:-cmdb_ci_server,cmdb_ci_web_application}
+      SERVICENOW_EXPOSURE_FIELD: ${SERVICENOW_EXPOSURE_FIELD:-}
+      SERVICENOW_ENVIRONMENT_FIELD: ${SERVICENOW_ENVIRONMENT_FIELD:-environment}
+      SERVICENOW_CRITICALITY_FIELD: ${SERVICENOW_CRITICALITY_FIELD:-business_criticality}
+      SERVICENOW_TICKET_WRITE_ENABLED: ${SERVICENOW_TICKET_WRITE_ENABLED:-false}
+      SERVICENOW_INCIDENT_TABLE: ${SERVICENOW_INCIDENT_TABLE:-incident}
+      SERVICENOW_TICKET_BASE_URL: ${SERVICENOW_TICKET_BASE_URL:-}
+      SERVICENOW_TICKET_USERNAME: ${SERVICENOW_TICKET_USERNAME:-}
+      SERVICENOW_TICKET_PASSWORD: ${SERVICENOW_TICKET_PASSWORD:-}
+      AI_ANALYST_ENABLED: ${AI_ANALYST_ENABLED:-false}
+      AI_ANALYST_DATA_APPROVED: ${AI_ANALYST_DATA_APPROVED:-false}
+      AI_ANALYST_API_KEY: ${AI_ANALYST_API_KEY:-}
+      AI_ANALYST_MODEL: ${AI_ANALYST_MODEL:-}
+      AI_ANALYST_BASE_URL: ${AI_ANALYST_BASE_URL:-https://api.openai.com/v1}
+      AI_ANALYST_MAX_OUTPUT_TOKENS: ${AI_ANALYST_MAX_OUTPUT_TOKENS:-600}
+      CISA_KEV_FEED_URL: ${CISA_KEV_FEED_URL:-https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json}
+      EPSS_API_URL: ${EPSS_API_URL:-https://api.first.org/data/v1/epss}
+      CERTSPOTTER_BASE_URL: ${CERTSPOTTER_BASE_URL:-https://api.certspotter.com}
+      CERTSPOTTER_API_TOKEN: ${CERTSPOTTER_API_TOKEN:-}
+      EXTERNAL_DISCOVERY_MAX_PAGES: ${EXTERNAL_DISCOVERY_MAX_PAGES:-100}
+      INTEGRATION_TIMEOUT_SECONDS: ${INTEGRATION_TIMEOUT_SECONDS:-15}
+      INTEGRATION_MAX_PAGES: ${INTEGRATION_MAX_PAGES:-100}
+    volumes:
+      - uploads_data:/app/uploads
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    networks: [app, data, egress]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    command: ["celery", "-A", "backend.workers.celery_app:celery_app", "worker", "--loglevel=INFO", "--concurrency=2"]
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      DATABASE_URL: postgresql+psycopg://sam:${POSTGRES_PASSWORD}@postgres:5432/sam
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      APP_SECRET_KEY: ${APP_SECRET_KEY:?Set APP_SECRET_KEY in .env}
+      UPLOAD_DIR: /app/uploads
+      QUALYS_BASE_URL: ${QUALYS_BASE_URL:-}
+      QUALYS_USERNAME: ${QUALYS_USERNAME:-}
+      QUALYS_PASSWORD: ${QUALYS_PASSWORD:-}
+      QUALYS_API_VERSION: ${QUALYS_API_VERSION:-6.0}
+      SERVICENOW_BASE_URL: ${SERVICENOW_BASE_URL:-}
+      SERVICENOW_USERNAME: ${SERVICENOW_USERNAME:-}
+      SERVICENOW_PASSWORD: ${SERVICENOW_PASSWORD:-}
+      SERVICENOW_TABLES: ${SERVICENOW_TABLES:-cmdb_ci_server,cmdb_ci_web_application}
+      SERVICENOW_EXPOSURE_FIELD: ${SERVICENOW_EXPOSURE_FIELD:-}
+      SERVICENOW_ENVIRONMENT_FIELD: ${SERVICENOW_ENVIRONMENT_FIELD:-environment}
+      SERVICENOW_CRITICALITY_FIELD: ${SERVICENOW_CRITICALITY_FIELD:-business_criticality}
+      CISA_KEV_FEED_URL: ${CISA_KEV_FEED_URL:-https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json}
+      EPSS_API_URL: ${EPSS_API_URL:-https://api.first.org/data/v1/epss}
+      CERTSPOTTER_BASE_URL: ${CERTSPOTTER_BASE_URL:-https://api.certspotter.com}
+      CERTSPOTTER_API_TOKEN: ${CERTSPOTTER_API_TOKEN:-}
+      EXTERNAL_DISCOVERY_MAX_PAGES: ${EXTERNAL_DISCOVERY_MAX_PAGES:-100}
+      INTEGRATION_TIMEOUT_SECONDS: ${INTEGRATION_TIMEOUT_SECONDS:-15}
+      INTEGRATION_MAX_PAGES: ${INTEGRATION_MAX_PAGES:-100}
+      IDEMPOTENCY_RETENTION_DAYS: ${IDEMPOTENCY_RETENTION_DAYS:-7}
+    volumes:
+      - uploads_data:/app/uploads
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    networks: [data, egress]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A backend.workers.celery_app:celery_app inspect ping --timeout=5 | grep -q pong"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  beat:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    command: ["celery", "-A", "backend.workers.celery_app:celery_app", "beat", "--loglevel=INFO"]
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      DATABASE_URL: postgresql+psycopg://sam:${POSTGRES_PASSWORD}@postgres:5432/sam
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      APP_SECRET_KEY: ${APP_SECRET_KEY:?Set APP_SECRET_KEY in .env}
+      IDEMPOTENCY_RETENTION_DAYS: ${IDEMPOTENCY_RETENTION_DAYS:-7}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    networks: [data]
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    ports:
+      - "${HTTP_PORT:-8080}:8080"
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      SAM_API_HOSTPORT: api:8000
+    networks: [app]
+    restart: unless-stopped
+
+networks:
+  app:
+  data:
+    internal: true
+  egress:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  uploads_data:

@@ -1,15 +1,39 @@
-from fastapi import APIRouter,Depends
-from backend.core.database import connection
+from fastapi import APIRouter, Depends, Query
+from sqlalchemy.orm import Session
+
+from backend.core.database import get_db
 from backend.core.security import current_user
-from backend.core.util import now,dump
-router=APIRouter(prefix='/api/threats',tags=['threat intelligence'])
-@router.get('/zero-day-signals')
-def zero_day_signals(user=Depends(current_user)):
-    with connection() as c:
-        signals=[dump(x) for x in c.execute('SELECT * FROM zero_day_signals ORDER BY created_at DESC').fetchall()]
-        candidates=c.execute("SELECT f.id finding_id,f.title,f.severity,a.id asset_id,a.name,a.kind,a.owner,a.criticality FROM findings f JOIN assets a ON a.id=f.asset_id WHERE f.state IN ('Open','In Progress') AND (f.cve IS NULL OR f.cve='') ORDER BY CASE f.severity WHEN 'Critical' THEN 0 WHEN 'High' THEN 1 ELSE 2 END").fetchall()
-        all_candidates={x['finding_id']:dict(x) for x in c.execute("SELECT f.id finding_id,f.title,f.severity,a.id asset_id,a.name,a.kind,a.owner,a.criticality FROM findings f JOIN assets a ON a.id=f.asset_id WHERE f.state IN ('Open','In Progress')").fetchall()}
-    for signal in signals:
-        ids=signal.get('evidence',{}).get('finding_ids',[])
-        signal['impactedAssets']=[all_candidates[i] for i in ids if i in all_candidates]
-    return {'signals':signals,'candidateFindings':[dict(x) for x in candidates],'warning':'A suspected signal is not confirmation of a zero-day; validate evidence and affected versions.'}
+from backend.schemas.common import AssetType
+from backend.schemas.threat_intel import ThreatIntelPage
+from backend.schemas.threats import ZeroDaySignalsRead
+from backend.services.threat_intel import list_threat_intelligence
+from backend.services.threats import zero_day_signals
+
+router = APIRouter(prefix="/threats", tags=["threat intelligence"])
+
+
+@router.get("/zero-day-signals", response_model=ZeroDaySignalsRead)
+def list_signals(user=Depends(current_user), session: Session = Depends(get_db)):
+    return zero_day_signals(session)
+
+
+@router.get("/intelligence", response_model=ThreatIntelPage)
+def list_intelligence(
+    entity: AssetType | None = None,
+    cve: str | None = Query(None, min_length=1, max_length=40, pattern=r"^[A-Za-z0-9-]+$"),
+    kev_only: bool = False,
+    min_epss: float | None = Query(None, ge=0, le=1),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    user=Depends(current_user),
+    session: Session = Depends(get_db),
+):
+    return list_threat_intelligence(
+        session,
+        entity=entity,
+        cve=cve,
+        kev_only=kev_only,
+        min_epss=min_epss,
+        limit=limit,
+        offset=offset,
+    )
